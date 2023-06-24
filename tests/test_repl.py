@@ -1,7 +1,6 @@
 import pytest
 import psycopg
 import time
-from psycopg.abc import ConnectionType
 from psycopg.repl import ReplicationCursor, AsyncReplicationCursor
 from psycopg.rows import Row, dict_row
 from select import select
