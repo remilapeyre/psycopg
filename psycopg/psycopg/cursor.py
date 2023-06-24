@@ -24,7 +24,7 @@ from . import pq
 from . import adapt
 from . import errors as e
 from .abc import ConnectionType, Query, Params, PQGen
-from .sql import Composable, SQL, Identifier
+from .sql import Composable, Composed, SQL, Identifier
 from .copy import Copy, Writer as CopyWriter
 from .rows import Row, RowMaker, RowFactory
 from ._column import Column
@@ -659,7 +659,7 @@ class BaseCursor(Generic[ConnectionType, Row]):
         elif type == "physical" and output_plugin is not None:
             raise ValueError("output_plugin can only be set for logical replication")
 
-        query = SQL("CREATE_REPLICATION_SLOT ")
+        query: Composable = SQL("CREATE_REPLICATION_SLOT ")
         query += Identifier(name)
         if temporary:
             query += SQL("TEMPORARY ")
@@ -686,9 +686,9 @@ class BaseCursor(Generic[ConnectionType, Row]):
         return self._execute_gen(query)
 
     def _start_replication_gen(
-        self, name: str, type: ReplicationType, start_lsn
+        self, name: str, type: ReplicationType, start_lsn: str
     ) -> PQGen[None]:
-        query = SQL("START_REPLICATION ")
+        query: Composable = SQL("START_REPLICATION ")
         if name is not None:
             query += SQL("SLOT {} ").format(Identifier(name))
 
@@ -702,11 +702,11 @@ class BaseCursor(Generic[ConnectionType, Row]):
 
     def _drop_replication_slot_gen(self, name: str, wait: bool = False) -> PQGen[None]:
         if wait:
-            query: Composable = SQL("DROP_REPLICATION_SLOT {} WAIT").format(
+            query: Composed = SQL("DROP_REPLICATION_SLOT {} WAIT").format(
                 Identifier(name)
             )
         else:
-            query: Composable = SQL("DROP_REPLICATION_SLOT {}").format(Identifier(name))
+            query = SQL("DROP_REPLICATION_SLOT {}").format(Identifier(name))
 
         return self._execute_gen(query, None)
 

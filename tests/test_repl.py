@@ -10,17 +10,15 @@ class ReplicationSlotManager:
     def __init__(self):
         self._slots: list[str] = []
 
-    def create_replication_slot(self, cur: ReplicationCursor, name: str, **kwargs):
+    def create_replication_slot(self, cur, name, **kwargs):
         cur.create_replication_slot(name, **kwargs)
         self._slots.append(name)
 
-    async def create_async_replication_slot(
-        self, acur: AsyncReplicationCursor, name: str, **kwargs
-    ):
+    async def create_async_replication_slot(self, acur, name, **kwargs):
         await acur.create_replication_slot(name, **kwargs)
         self._slots.append(name)
 
-    def drop_replication_slot(self, cur: ReplicationCursor[Row], name: str):
+    def drop_replication_slot(self, cur, name):
         cur.drop_replication_slot(name)
         self._slots.remove(name)
 
@@ -71,7 +69,7 @@ class BaseTest:
 
         return res
 
-    def _test_extended_protocol(self, conn) -> None:
+    def _test_extended_protocol(self, conn):
         def _pipeline():
             with conn.pipeline() as p:
                 conn.execute("SELECT 1")
