@@ -458,7 +458,11 @@ class BaseConnection(Generic[Row]):
             self._pipeline.result_queue.append(None)
             return None
 
-        self.pgconn.send_query_params(command, None, result_format=result_format)
+        if result_format is BINARY:
+            # Only the extended protocol supports binary
+            self.pgconn.send_query_params(command, None, result_format=BINARY)
+        else:
+            self.pgconn.send_query(command)
 
         result = (yield from execute(self.pgconn))[-1]
         if result.status != COMMAND_OK and result.status != TUPLES_OK:

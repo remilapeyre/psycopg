@@ -7,7 +7,7 @@ psycopg cursor objects
 from functools import partial
 from types import TracebackType
 from typing import Any, Generic, Iterable, Iterator, List
-from typing import Optional, NoReturn, Sequence, Tuple, Type, TypeVar
+from typing import Optional, NoReturn, Sequence, Tuple, Type, TypeVar, TypeAlias, Literal
 from typing import overload, TYPE_CHECKING
 from contextlib import contextmanager
 
@@ -15,6 +15,7 @@ from . import pq
 from . import adapt
 from . import errors as e
 from .abc import ConnectionType, Query, Params, PQGen
+from .sql import Composable, SQL, Identifier
 from .copy import Copy, Writer as CopyWriter
 from .rows import Row, RowMaker, RowFactory
 from ._column import Column
@@ -44,6 +45,8 @@ PIPELINE_ABORTED = pq.ExecStatus.PIPELINE_ABORTED
 
 ACTIVE = pq.TransactionStatus.ACTIVE
 
+
+ReplicationType: TypeAlias = Literal['physical', 'logical']
 
 class BaseCursor(Generic[ConnectionType, Row]):
     __slots__ = """
@@ -594,7 +597,7 @@ class BaseCursor(Generic[ConnectionType, Row]):
         Check that the value returned in a copy() operation is a legit COPY.
         """
         status = result.status
-        if status == COPY_IN or status == COPY_OUT:
+        if status == COPY_IN or status == COPY_OUT or status == COPY_BOTH:
             return
         elif status == FATAL_ERROR:
             raise e.error_from_result(result, encoding=self._encoding)
@@ -627,6 +630,71 @@ class BaseCursor(Generic[ConnectionType, Row]):
     @property
     def _encoding(self) -> str:
         return pgconn_encoding(self._pgconn)
+
+    def _create_replication_slot_gen(
+        self,
+        name: str,
+        *,
+        temporary: bool = False,
+        type: ReplicationType,
+        output_plugin: Optional[str] = None,
+        two_phase: bool = False,
+        reserve_wal: bool = False,
+        snapshot: Optional[str] = None) -> PQGen[None]:
+
+        if type not in ('logical', 'physical'):
+            raise ValueError(f"type must be 'physical' or 'logical', not {type!r}")
+        elif type == 'logical' and output_plugin is None:
+            raise ValueError("output_plugin is required for logical replication")
+        elif type == 'physical' and output_plugin is not None:
+            raise ValueError("output_plugin can only be set for logical replication")
+
+        query = SQL("CREATE_REPLICATION_SLOT ")
+        query += Identifier(name)
+        if temporary:
+            query += SQL('TEMPORARY ')
+        query += SQL(f'{type.upper()} ')
+        if output_plugin:
+            query += Identifier(f'{output_plugin}') + SQL(' ')
+
+        # reserve_wal is only for physical, the other two only for logical
+        if reserve_wal:
+            query += SQL("RESERVE_WAL ")
+
+        match snapshot:
+            case 'export':
+                query += SQL("EXPORT_SNAPSHOT ")
+            case 'use':
+                query += SQL("USE_SNAPSHOT ")
+            case 'nothing':
+                query += SQL("NOEXPORT_SNAPSHOT ")
+
+        # TWO_PHASE is only supported on PG15
+        # if two_phase:
+        #     query += SQL("TWO_PHASE ")
+
+        return self._execute_gen(query)
+
+    def _start_replication_gen(self, name: str, type: ReplicationType, start_lsn) -> PQGen[None]:
+        query = SQL("START_REPLICATION ")
+        if name is not None:
+            query += SQL("SLOT {} ").format(Identifier(name))
+
+        if type == 'physical':
+            query += SQL("PHYSICAL ")
+        else:
+            query += SQL("LOGICAL ")
+
+        query += SQL(start_lsn)
+        return self._start_copy_gen(query)
+
+    def _drop_replication_slot_gen(self, name: str, wait: bool = False) -> PQGen[None]:
+        if wait:
+            query: Composable = SQL("DROP_REPLICATION_SLOT {} WAIT").format(Identifier(name))
+        else:
+            query: Composable = SQL("DROP_REPLICATION_SLOT {}").format(Identifier(name))
+
+        return self._execute_gen(query, None)
 
 
 class Cursor(BaseCursor["Connection[Any]", Row]):
