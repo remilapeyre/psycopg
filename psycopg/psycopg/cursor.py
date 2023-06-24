@@ -14,11 +14,12 @@ from typing import (
     Tuple,
     Type,
     TypeVar,
-    TypeAlias,
-    Literal,
 )
 from typing import overload, TYPE_CHECKING
 from contextlib import contextmanager
+from typing_extensions import TypeAlias, Literal
+import struct
+import time
 
 from . import pq
 from . import adapt
@@ -27,12 +28,13 @@ from .abc import ConnectionType, Query, Params, PQGen
 from .sql import Composable, Composed, SQL, Identifier
 from .copy import Copy, Writer as CopyWriter
 from .rows import Row, RowMaker, RowFactory
+from .waiting import Wait
 from ._column import Column
 from ._queries import PostgresQuery, PostgresClientQuery
 from ._pipeline import Pipeline
 from ._encodings import pgconn_encoding
 from ._preparing import Prepare
-from .generators import execute, fetch, send
+from .generators import execute, fetch, send, copy_to, copy_from, copy_end
 
 if TYPE_CHECKING:
     from .abc import Transformer
@@ -58,6 +60,20 @@ ACTIVE = pq.TransactionStatus.ACTIVE
 ReplicationType: TypeAlias = Literal["physical", "logical"]
 
 
+_POSTGRES_EPOCH_JDATE = 2451545
+_UNIX_EPOCH_JDATE = 2440588
+_SECS_PER_DAY = 86400
+_USECS_PER_SEC = 1000000
+
+
+def _now() -> int:
+    t = time.time()
+    result: int = (
+        int(t) - ((_POSTGRES_EPOCH_JDATE - _UNIX_EPOCH_JDATE) * _SECS_PER_DAY)
+    ) * _USECS_PER_SEC
+    return result + int((t % 1) * _USECS_PER_SEC)
+
+
 class BaseCursor(Generic[ConnectionType, Row]):
     __slots__ = """
         _conn format _adapters arraysize _closed _results pgresult _pos
@@ -71,6 +87,9 @@ class BaseCursor(Generic[ConnectionType, Row]):
     _tx: "Transformer"
     _make_row: RowMaker[Row]
     _pgconn: "PGconn"
+    _write_lsn: int
+    _flush_lsn: int
+    _apply_lsn: int
 
     def __init__(self, connection: ConnectionType):
         self._conn = connection
@@ -671,13 +690,16 @@ class BaseCursor(Generic[ConnectionType, Row]):
         if reserve_wal:
             query += SQL("RESERVE_WAL ")
 
-        match snapshot:
-            case "export":
-                query += SQL("EXPORT_SNAPSHOT ")
-            case "use":
-                query += SQL("USE_SNAPSHOT ")
-            case "nothing":
-                query += SQL("NOEXPORT_SNAPSHOT ")
+        if snapshot is None:
+            pass
+        elif snapshot == "export":
+            query += SQL("EXPORT_SNAPSHOT ")
+        elif snapshot == "use":
+            query += SQL("USE_SNAPSHOT ")
+        elif snapshot == "nothing":
+            query += SQL("NOEXPORT_SNAPSHOT ")
+        else:
+            raise ValueError(f"unexpected value for snapshot: {snapshot!r}")
 
         # TWO_PHASE is only supported on PG15
         # if two_phase:
@@ -700,6 +722,31 @@ class BaseCursor(Generic[ConnectionType, Row]):
         query += SQL(start_lsn)
         return self._start_copy_gen(query)
 
+    def _stop_replication_gen(self) -> PQGen[None]:
+        res: Optional[PGresult]
+        res = yield from copy_end(self._pgconn, None)
+
+        if res.status == pq.ExecStatus.COPY_OUT:
+            # We're doing a client-initiated clean exit and have sent CopyDone to
+            # the server. Drain any messages, so we don't miss a last-minute
+            # ErrorResponse. The walsender stops generating XLogData records once
+            # it sees CopyDone, so expect this to finish quickly. After CopyDone,
+            # it's too late for sendFeedback(), even if this were to take a long
+            # time. Hence, use synchronous-mode PQgetCopyData().
+            while True:
+                r, _ = self._conn.pgconn.get_copy_data(0)
+                if r == -1:
+                    break
+
+                yield Wait.W
+
+            res = self._conn.pgconn.get_result()
+
+        while res is not None:
+            if res.status != pq.ExecStatus.COMMAND_OK:
+                raise e.error_from_result(res)
+            res = self._conn.pgconn.get_result()
+
     def _drop_replication_slot_gen(self, name: str, wait: bool = False) -> PQGen[None]:
         if wait:
             query: Composed = SQL("DROP_REPLICATION_SLOT {} WAIT").format(
@@ -709,6 +756,59 @@ class BaseCursor(Generic[ConnectionType, Row]):
             query = SQL("DROP_REPLICATION_SLOT {}").format(Identifier(name))
 
         return self._execute_gen(query, None)
+
+    def _send_feedback_gen(
+        self,
+        write_lsn: int = 0,
+        flush_lsn: int = 0,
+        apply_lsn: int = 0,
+        reply: bool = False,
+        force: bool = False,
+    ) -> PQGen[None]:
+        buffer = _pack_feedback(
+            b"r",
+            write_lsn,
+            flush_lsn,
+            apply_lsn,
+            _now(),
+            reply,
+        )
+        yield from copy_to(self._pgconn, buffer)
+        self._conn.pgconn.flush()
+
+    def _read_message_gen(self) -> PQGen[Optional[tuple[bytes, int, Any, Any, Any]]]:
+        data = yield from copy_from(self._pgconn)
+        if not isinstance(data, memoryview):
+            self.pgresult = data
+            if self.pgresult.status != pq.ExecStatus.COMMAND_OK:
+                raise e.error_from_result(self.pgresult)
+            return None
+
+        if chr(data[0]) == "w":
+            hdr = 1 + 8 + 8 + 8
+            if len(data) < hdr + 1:
+                raise e.OperationalError("data message header too small")
+
+            _, data_start, wal_end, send_time = _unpack_data(data[:hdr])
+            return (
+                bytes(data[hdr:]),
+                len(data) - hdr,
+                data_start,
+                wal_end,
+                send_time,
+            )
+
+        elif chr(data[0]) == "k":
+            if len(data) < 1 + 8 + 8 + 1:
+                raise e.OperationalError("keepalive message header too small")
+            _, wal_end, send_time, reply = _unpack_keepalive(data[:])
+            if reply:
+                yield from self._send_feedback_gen(
+                    self._write_lsn, self._flush_lsn, self._apply_lsn
+                )
+            return None
+
+        raise e.OperationalError("unrecognized replication message type")
 
 
 class Cursor(BaseCursor["Connection[Any]", Row]):
@@ -979,3 +1079,8 @@ class Cursor(BaseCursor["Connection[Any]", Row]):
         ):
             with self._conn.lock:
                 self._conn.wait(self._conn._pipeline._fetch_gen(flush=True))
+
+
+_pack_feedback = struct.Struct("!cqqqq?").pack
+_unpack_data = struct.Struct("!cqqq").unpack
+_unpack_keepalive = struct.Struct("!cqq?").unpack

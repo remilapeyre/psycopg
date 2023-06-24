@@ -118,6 +118,7 @@ _crdb_reasons = {
     "password_encryption": 42519,
     "pg_terminate_backend": 35897,
     "range": 41282,
+    "replication support": 105130,
     "scroll cursor": 77102,
     "server-side cursor": 41412,
     "severity_nonlocalized": 81794,

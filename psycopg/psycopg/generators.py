@@ -297,7 +297,7 @@ def copy_end(pgconn: PGconn, error: Optional[bytes]) -> PQGen[PGresult]:
 
     # Retrieve the final result of copy
     (result,) = yield from _fetch_many(pgconn)
-    if result.status != COMMAND_OK:
+    if result.status != COMMAND_OK and result.status != COPY_OUT:
         encoding = pgconn_encoding(pgconn)
         raise e.error_from_result(result, encoding=encoding)
 

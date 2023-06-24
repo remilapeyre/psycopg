@@ -64,7 +64,8 @@ jobs:
           docker pull ${{ matrix.postgres }}
           docker run --rm -d --name postgres -p 5432:5432 \
             -e POSTGRES_PASSWORD=password ${{ matrix.postgres }} \
-            -c max_prepared_transactions=10
+            -c max_prepared_transactions=10 \
+            -c wal_level=logical
 
       - name: Install the wanted libpq version
         run: sudo ./tools/build/ci_install_libpq.sh ${{ matrix.libpq }}

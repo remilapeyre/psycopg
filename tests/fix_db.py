@@ -9,6 +9,7 @@ from typing import Optional
 import psycopg
 from psycopg import pq
 from psycopg import sql
+from psycopg.replication import Connection, AsyncConnection
 from psycopg._compat import cache
 from psycopg.pq._debug import PGconnDebug
 
@@ -190,6 +191,40 @@ def conn(conn_cls, dsn, request, tracefile):
     with maybe_trace(conn.pgconn, tracefile, request.function):
         yield conn
     conn.close()
+
+
+@pytest.fixture
+def rconn(conn, dsn, request, tracefile):
+    val = conn.execute("show wal_level").fetchone()[0]
+    if val != "logical":
+        pytest.skip("replication not enabled")
+
+    rconn = Connection.connect(
+        dsn,
+        replication="database",
+        autocommit=True,
+    )
+
+    with maybe_trace(rconn.pgconn, tracefile, request.function):
+        yield rconn
+    rconn.close()
+
+
+@pytest.fixture
+async def arconn(conn, dsn, request, tracefile):
+    val = conn.execute("show wal_level").fetchone()[0]
+    if val != "logical":
+        pytest.skip("replication not enabled")
+
+    rconn = await AsyncConnection.connect(
+        dsn,
+        replication="database",
+        autocommit=True,
+    )
+
+    with maybe_trace(rconn.pgconn, tracefile, request.function):
+        yield rconn
+    await rconn.close()
 
 
 @pytest.fixture(params=[True, False], ids=["pipeline=on", "pipeline=off"])
