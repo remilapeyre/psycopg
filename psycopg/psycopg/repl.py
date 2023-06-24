@@ -17,19 +17,20 @@ from . import errors as e
 
 from typing import Literal, TypeAlias
 
-ReplicationType: TypeAlias = Literal['physical', 'logical']
+ReplicationType: TypeAlias = Literal["physical", "logical"]
 
 _POSTGRES_EPOCH_JDATE = 2451545
 _UNIX_EPOCH_JDATE = 2440588
 _SECS_PER_DAY = 86400
 _USECS_PER_SEC = 1000000
 
+
 def _now() -> int:
     t = time.time()
     result: int = (
         int(t) - ((_POSTGRES_EPOCH_JDATE - _UNIX_EPOCH_JDATE) * _SECS_PER_DAY)
     ) * _USECS_PER_SEC
-    return result + int((t%1) * _USECS_PER_SEC)
+    return result + int((t % 1) * _USECS_PER_SEC)
 
 
 class ReplicationCursor(Cursor[Row]):
@@ -47,15 +48,15 @@ class ReplicationCursor(Cursor[Row]):
         return self._conn.pgconn.socket
 
     def create_replication_slot(
-            self,
-            name: str,
-            *,
-            temporary: bool = False,
-            type: ReplicationType,
-            output_plugin: Optional[str] = None,
-            two_phase: bool = False,
-            reserve_wal: bool = False,
-            snapshot: Optional[str] = None
+        self,
+        name: str,
+        *,
+        temporary: bool = False,
+        type: ReplicationType,
+        output_plugin: Optional[str] = None,
+        two_phase: bool = False,
+        reserve_wal: bool = False,
+        snapshot: Optional[str] = None
     ) -> None:
         try:
             with self._conn.lock:
@@ -76,19 +77,17 @@ class ReplicationCursor(Cursor[Row]):
     def drop_replication_slot(self, name: str, wait: bool = False) -> None:
         try:
             with self._conn.lock:
-                self._conn.wait(
-                    self._drop_replication_slot_gen(name, wait)
-                )
+                self._conn.wait(self._drop_replication_slot_gen(name, wait))
         except e._NO_TRACEBACK as ex:
             raise ex.with_traceback(None)
 
     @contextmanager
-    def start_replication(self, name: str, type: ReplicationType, start_lsn: str) -> Iterator[None]:
+    def start_replication(
+        self, name: str, type: ReplicationType, start_lsn: str
+    ) -> Iterator[None]:
         try:
             with self._conn.lock:
-                self._conn.wait(
-                    self._start_replication_gen(name, type, start_lsn)
-                )
+                self._conn.wait(self._start_replication_gen(name, type, start_lsn))
 
             yield
             with self._conn.lock:
@@ -125,8 +124,14 @@ class ReplicationCursor(Cursor[Row]):
         except e._NO_TRACEBACK as ex:
             raise ex.with_traceback(None)
 
-    def send_feedback(self, write_lsn: int = 0, flush_lsn: int = 0, apply_lsn: int = 0,
-                      reply: bool =False, force: bool=False) -> None:
+    def send_feedback(
+        self,
+        write_lsn: int = 0,
+        flush_lsn: int = 0,
+        apply_lsn: int = 0,
+        reply: bool = False,
+        force: bool = False,
+    ) -> None:
         if write_lsn > self._write_lsn:
             self._write_lsn = write_lsn
         if flush_lsn > self._flush_lsn:
@@ -135,7 +140,7 @@ class ReplicationCursor(Cursor[Row]):
             self._apply_lsn = apply_lsn
 
         buffer = _pack_feedback(
-            b'r',
+            b"r",
             self._write_lsn,
             self._flush_lsn,
             self._apply_lsn,
@@ -171,7 +176,10 @@ class ReplicationCursor(Cursor[Row]):
             if length == -1:
                 self.pgresult = self._conn.pgconn.get_result()
 
-                if self.pgresult is not None and self.pgresult.status != pq.ExecStatus.COMMAND_OK:
+                if (
+                    self.pgresult is not None
+                    and self.pgresult.status != pq.ExecStatus.COMMAND_OK
+                ):
                     raise e.error_from_result(self.pgresult)
 
                 return None
@@ -181,7 +189,7 @@ class ReplicationCursor(Cursor[Row]):
             # will trigger read condition in select() in the calling code anyway.
             consumed = True
 
-            if chr(buffer[0]) == 'w':
+            if chr(buffer[0]) == "w":
                 hdr = 1 + 8 + 8 + 8
                 if len(buffer) < 1 + 8 + 8 + 8 + 1:
                     raise e.OperationalError("data message header too small")
@@ -189,12 +197,14 @@ class ReplicationCursor(Cursor[Row]):
                 _, data_start, wal_end, send_time = _unpack_data(buffer[:hdr])
                 return bytes(buffer[hdr:])
 
-            elif chr(buffer[0]) == 'k':
+            elif chr(buffer[0]) == "k":
                 if len(buffer) < 1 + 8 + 8 + 1:
                     raise e.OperationalError("keepalive message header too small")
                 _, wal_end, send_time, reply = _unpack_keepalive(buffer[:])
                 if reply:
-                    self.send_feedback(self._write_lsn, self._flush_lsn, self._apply_lsn)
+                    self.send_feedback(
+                        self._write_lsn, self._flush_lsn, self._apply_lsn
+                    )
             else:
                 raise e.OperationalError("unrecognized replication message type")
 
@@ -216,15 +226,15 @@ class AsyncReplicationCursor(AsyncCursor[Row]):
         return self._conn.pgconn.socket
 
     async def create_replication_slot(
-            self,
-            name: str,
-            *,
-            temporary: bool = False,
-            type: ReplicationType,
-            output_plugin: Optional[str] = None,
-            two_phase: bool = False,
-            reserve_wal: bool = False,
-            snapshot: Optional[str] = None
+        self,
+        name: str,
+        *,
+        temporary: bool = False,
+        type: ReplicationType,
+        output_plugin: Optional[str] = None,
+        two_phase: bool = False,
+        reserve_wal: bool = False,
+        snapshot: Optional[str] = None
     ) -> None:
         try:
             async with self._conn.lock:
@@ -245,14 +255,14 @@ class AsyncReplicationCursor(AsyncCursor[Row]):
     async def drop_replication_slot(self, name: str, wait: bool = False) -> None:
         try:
             async with self._conn.lock:
-                await self._conn.wait(
-                    self._drop_replication_slot_gen(name, wait)
-                )
+                await self._conn.wait(self._drop_replication_slot_gen(name, wait))
         except e._NO_TRACEBACK as ex:
             raise ex.with_traceback(None)
 
     @asynccontextmanager
-    async def start_replication(self, name: str, type: ReplicationType, start_lsn: str) -> Iterator[None]:
+    async def start_replication(
+        self, name: str, type: ReplicationType, start_lsn: str
+    ) -> Iterator[None]:
         try:
             async with self._conn.lock:
                 await self._conn.wait(
@@ -294,8 +304,14 @@ class AsyncReplicationCursor(AsyncCursor[Row]):
         except e._NO_TRACEBACK as ex:
             raise ex.with_traceback(None)
 
-    async def send_feedback(self, write_lsn: int = 0, flush_lsn: int = 0, apply_lsn: int = 0,
-                      reply: bool =False, force: bool=False) -> None:
+    async def send_feedback(
+        self,
+        write_lsn: int = 0,
+        flush_lsn: int = 0,
+        apply_lsn: int = 0,
+        reply: bool = False,
+        force: bool = False,
+    ) -> None:
         if write_lsn > self._write_lsn:
             self._write_lsn = write_lsn
         if flush_lsn > self._flush_lsn:
@@ -304,7 +320,7 @@ class AsyncReplicationCursor(AsyncCursor[Row]):
             self._apply_lsn = apply_lsn
 
         buffer = _pack_feedback(
-            b'r',
+            b"r",
             self._write_lsn,
             self._flush_lsn,
             self._apply_lsn,
@@ -315,6 +331,7 @@ class AsyncReplicationCursor(AsyncCursor[Row]):
         self._conn.pgconn.put_copy_data(buffer)
         self._conn.pgconn.flush()
 
-_pack_feedback = struct.Struct('!cqqqq?').pack
-_unpack_data = struct.Struct('!cqqq').unpack
-_unpack_keepalive = struct.Struct('!cqq?').unpack
+
+_pack_feedback = struct.Struct("!cqqqq?").pack
+_unpack_data = struct.Struct("!cqqq").unpack
+_unpack_keepalive = struct.Struct("!cqq?").unpack
